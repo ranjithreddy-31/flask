@@ -1,96 +1,131 @@
-import uuid
-from flask import Flask, request
-from db import stores, items
+import os
+from flask import Flask, request, jsonify
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy import text
+from db import db
+from models import ItemModel, StoreModel
+from flask_smorest import Api
+from schemas import ItemSchema, ItemUpdateSchema, StoreSchema
 
-app = Flask(__name__)
+store_schema = StoreSchema()
+item_schema = ItemSchema()
+item_update_schema = ItemUpdateSchema()
 
+def create_app():
+    app = Flask(__name__)
+    app.config["SQLALCHEMY_DATABASE_URI"] = os.getenv("DATABASE_URL", "sqlite:///data.db")
+    app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
+    db.init_app(app)
 
+    with app.app_context():
+        db.create_all()
 
-@app.route("/", methods = ["GET"])
-@app.route("/home", methods = ["GET"])
+    @app.before_request
+    def enforce_foreign_keys():
+        if db.engine.dialect.name == "sqlite":
+            db.session.execute(text("PRAGMA foreign_keys=ON"))
+
+    return app
+
+app = create_app()
+
+@app.route("/", methods=["GET"])
+@app.route("/home", methods=["GET"])
 def home():
     return "This is my flask app!!"
 
-@app.route("/store", methods = ["GET"])
-def get_stores():
-    return {"stores": list(stores.values())}
-
-@app.route("/item", methods = ["GET"])
-def get_items():
-    return {"items": list(items.values())}
-
-@app.route("/store", methods = ["POST"])
+@app.route("/store", methods=["POST"])
 def create_stores():
-    store_data = request.get_json()
-    store_id = uuid.uuid4().hex
-    new_store = {**store_data, "id": store_id}
-    stores[store_id] = new_store
-    return new_store, 201
-
-@app.route("/item", methods = ["POST"])
-def add_items():
-    item_data = request.get_json()
-    if item_data["store_id"] not in stores:
-        return {"message": "store not found"}, 404
-    item_id = uuid.uuid4().hex
-    new_item = {**item_data, "id": item_id}
-    items[item_id] = new_item
-    return new_item, 201
-
-@app.route("/store/<store_id>", methods = ["GET"])
-def get_store(store_id):
+    data = request.get_json()
+    store_data = store_schema.load(data)
+    new_store = StoreModel(**store_data)
     try:
-        return stores[store_id]
-    except:
-        return {"message": "store not found"}, 404  
-    
-@app.route("/store/<store_id>", methods = ["PUT"])
+        db.session.add(new_store)
+        db.session.commit()
+        return jsonify(store_schema.dump(new_store)), 201
+    except Exception as e:
+        return {"message": f"An error occurred while saving to DB: {str(e)}"}, 400
+
+@app.route("/store", methods=["GET"])
+def get_all_stores():
+    stores = StoreModel.query.all()
+    return jsonify({"stores": [store_schema.dump(store) for store in stores]})
+
+@app.route("/store/<int:store_id>", methods=["GET"])
+def get_store(store_id):
+    store = StoreModel.query.get_or_404(store_id)
+    return jsonify(store_schema.dump(store))
+
+@app.route("/store/<int:store_id>", methods=["PUT"])
 def update_store(store_id):
     store_data = request.get_json()
-    try:
-        store = stores[store_id]
-        store |= store_data
-        return store_data, 200
-    except:
-        return {"message": "store not found"}, 404  
+    store = StoreModel.query.get(store_id)
+    if store:
+        store.name = store_data["name"]
+    else:
+        store_data["id"] = store_id
+        store = StoreModel(**store_data)
     
-@app.route("/store/<store_id>", methods = ["DELETE"])
+    db.session.add(store)
+    db.session.commit()
+
+    return jsonify(store_schema.dump(store))
+
+@app.route("/store/<int:store_id>", methods=["DELETE"])
 def delete_store(store_id):
-    try:
-        for item in list(items.keys()):
-            print(item)
-            if items[item]['store_id'] == store_id:
-                del items[item]
-        del stores[store_id]
-        return {"message": "successfully deleted the store!!"}, 200 
-    except:
-        return {"message": "store not found"}, 404  
+    store = StoreModel.query.get_or_404(store_id)
+    db.session.delete(store)
+    db.session.commit()
+    return {"message": "Store Deleted!!"}
 
-@app.route("/item/<string:item_id>", methods = ["GET"])
-def get_store_items(item_id):
+@app.route("/item", methods=["POST"])
+def add_items():
+    data = request.get_json()
+    item_data = item_schema.load(data)
+    new_item = ItemModel(**item_data)
     try:
-        return items[item_id], 200
-    except:
-        return {"message": "Item not found"}, 404  
-    
-@app.route("/item/<string:item_id>", methods = ["PUT"])
-def update_store_items(item_id):
+        db.session.add(new_item)
+        db.session.commit()
+        return jsonify(item_schema.dump(new_item)), 201
+    except IntegrityError as e:
+        db.session.rollback()
+        return {"message": f"An error occurred while saving to DB: {str(e.orig)}"}, 400
+    except Exception as e:
+        db.session.rollback()
+        return {"message": f"An unexpected error occurred: {str(e)}"}, 400
+
+@app.route("/item", methods=["GET"])
+def get_all_items():
+    items = ItemModel.query.all()
+    return jsonify({"items": [item_schema.dump(item) for item in items]})
+
+@app.route("/item/<int:item_id>", methods=["GET"])
+def get_item(item_id):
+    item = ItemModel.query.get_or_404(item_id)
+    return jsonify(item_schema.dump(item))
+
+@app.route("/item/<int:item_id>", methods=["PUT"])
+def update_item(item_id):
     item_data = request.get_json()
-    try:
-        item = items[item_id]
-        item|=item_data
-        return item, 200
-    except:
-        return {"message": "Item not found"}, 404  
-    
-@app.route("/item/<string:item_id>", methods = ["DELETE"])
-def delete_store_items(item_id):
-    try:
-        del items[item_id]
-        return {"message": "successfully deleted the item!!"}, 200
-    except:
-        return {"message": "Item not found"}, 404  
+    item = ItemModel.query.get(item_id)
+    if item:
+        item.name = item_data["name"]
+        item.price = item_data["price"]
+    else:
+        item_data["id"] = item_id
+        item = ItemModel(**item_data)
 
+    db.session.add(item)
+    db.session.commit()
+
+    return jsonify(item_schema.dump(item))
+
+@app.route("/item/<int:item_id>", methods=["DELETE"])
+def delete_item(item_id):
+    item = ItemModel.query.get_or_404(item_id)
+    db.session.delete(item)
+    db.session.commit()
+    return {"message": "Item Deleted!!"}
 
 if __name__ == "__main__":
     app.run(debug=True)
